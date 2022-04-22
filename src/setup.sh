@@ -19,7 +19,7 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-# Set the shared memory buffer length to 2MB.
+# [VOP] Set the shared memory buffer length to 3MB.
 # Default size is 256KB, which at high sample rates will fill up
 # in only a few ms, making buffer overruns more likely when the
 # host CPU gets busy.
@@ -28,7 +28,9 @@ fi
 #
 # For high sample rates and much larger buffers, consider using
 # BeagleLogic's prudaq support instead.
-modprobe uio_pruss extram_pool_sz=2097152
+#
+#[VOP] Memory gets split in 3 1MB partitions for both adcs and dac
+modprobe uio_pruss extram_pool_sz=3145728
 
 DEVICE_OVERLAY=/lib/firmware/prudaq-00A0.dtbo
 if [[ ! -f $DEVICE_OVERLAY ]] ; then

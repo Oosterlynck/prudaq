@@ -57,13 +57,17 @@ permissions and limitations under the License.
    //
    // It'd be nice to use P8.20 and P8.21, but those are used by emmc2, so we'd
    // have to disable that and boot from microSD instead of onbard flash.
+
+
+   //[VOP] Change Pins to be only on the P8 bank, cuz we don't need the parallel lines and makes PCB easier.
    exclusive-use =
          // These pins will be configured as inputs to PRU1
          "P8.27", "P8.28", "P8.29", "P8.30",
-         "P8.39", "P8.40", "P8.41", "P8.42", "P8.43", "P8.44", "P8.45", "P8.46",
-         "P9.26",
+         "P8.39", "P8.40", "P8.41", "P8.42", "P8.43", "P8.44";
+         //"P9.26", ???
          // And these will be configured as outputs from PRU0
-         "P9.25", "P9.27", "P9.28", "P9.29", "P9.30", "P9.31";
+         //"P9.25", "P9.27", "P9.28", "P9.29", "P9.30", "P9.31";
+         "P8.45", "P8.46";
 
    fragment@0 {
       target = <&am33xx_pinmux>;
@@ -80,29 +84,32 @@ permissions and limitations under the License.
             // is 0x06.  We could also set bits 3 and 4 to enable a pullup or pulldown.
             pinctrl-single,pins = <
                // Input pins
-               0x0E0 0x26  // P8.27
+               0x0E0 0x36  // P8.27 with pulldown enabled (SDATA ADC0)
                0x0E8 0x26  // P8.28
                0x0E4 0x26  // P8.29
                0x0EC 0x26  // P8.30
 
-               0x0B8 0x26  // P8.39
+               0x0B8 0x36  // P8.39 with pulldown enabled (SDATA ADC1)
                0x0BC 0x26  // P8.40
-               0x0B0 0x26  // P8.41
+               //0x0B0 0x26  // P8.41
                0x0B4 0x26  // P8.42
-               0x0A8 0x26  // P8.43
+               // 0x0A8 0x26  // P8.43
                0x0AC 0x26  // P8.44
-               0x0A0 0x26  // P8.45
+               // 0x0A0 0x26  // P8.45
                0x0A4 0x26  // P8.46
 
-               0x180 0x26  // P9.26
+               //0x180 0x26  // P9.26 ???
 
                // Output pins
-               0x1AC 0x05  // P9.25
-               0x1A4 0x05  // P9.27
-               0x19C 0x05  // P9.28
-               0x194 0x05  // P9.29
-               0x198 0x05  // P9.30
-               0x190 0x05  // P9.31
+               // 0x1AC 0x05  // P9.25
+               // 0x1A4 0x05  // P9.27
+               // 0x19C 0x05  // P9.28
+               // 0x194 0x05  // P9.29
+               // 0x198 0x05  // P9.30
+               // 0x190 0x05  // P9.31
+               0x0B0 0x15  // P8.41 with pulldown enabled (SDATA DAC)
+               0x0A8 0x0C  // P8.43 with pullup enabled (CS)
+               0x0A0 0x15  // P8.45 with pulldown enabled (SCLK)
             >;
          };
       };

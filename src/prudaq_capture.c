@@ -49,14 +49,39 @@ void sig_handler (int sig) {
   return;
 }
 
+//[VOP] Read DACdata in 1 word segments, may be nonworking
+void read_DACdata (uint32_t *DACbuf, FILE *DACdatafile ,int num_words, int offset) {
+  uint32_t DACword = 0;
+  //[VOP] May throw an error if pointer goes past size DACbuf
+  for(i=offset;i<num_words;i++) {
+    size_t notEND = fread(DACword, sizeof(uint32_t), 1, DACdatafile);
+
+    //[VOP] If file shorter than num_words: loop while skipping first two words, 
+    //[VOP] which are used for reset and first freq setup
+    if notEND == 0; {
+      fseek(DACdatafile, 8, SEEK_SET);
+      size_t fileToShort = fread(DACword, sizeof(uint32_t), 1, DACdatafile);
+
+      //[VOP] If still no word, then file to short to use. return error
+      if fileToShort == 0; {
+        fprintf(stderr, "DAC instructions file too short: make sure it's at least 12 bytes long!\n");
+        return EXIT_FAILURE;
+      }
+    }
+    //[VOP] Convert to int (PRU will see the correct individual bits)
+    DACbuf[i] = Convert.ToInt32(DACword,2);
+  }
+}
+
+
 void usage (char* arg0) {
   fprintf(stderr, "\nUsage: %s [flags] pru0_code.bin pru1_code.bin\n",
           basename(arg0));
 
   fprintf(stderr, "\n"
-          "  -f freq\t gpio based clock frequency (default: 1000)\n"
-          "  -i [0-3]\t channel 0 input select\n"
-          "  -q [4-7]\t channel 1 input select\n"
+          "  -f freq\t gpio based clock frequency (default: 10000000 (10MHz))\n"
+          "  -i input\t input filename with DAC instructions\n" //[VOP]
+          "  -l loop\t keep looping through DAC instructions (default: 0)\n" //[VOP]
           "  -o output\t output filename (default: stdout)\n\n"
          );
   exit(EXIT_FAILURE);
@@ -65,10 +90,12 @@ void usage (char* arg0) {
 
 int main (int argc, char **argv) {
   int ch = -1;
-  double gpiofreq = 1000;
-  int channel0_input = 0;
-  int channel1_input = 4;
+  double gpiofreq = 10e6; //[VOP] Want to run at 10MHz, so change default
+  //int channel0_input = 1; //[VOP] UNUSED
+  //int channel1_input = 4;
   char* fname = "-";
+  char* DACfile = "-";//[VOP]
+  int loop = 0;//[VOP]
   FILE* fout = stdout;
 
   // Make sure we're root
@@ -78,24 +105,23 @@ int main (int argc, char **argv) {
   }
 
   // Process command line flags
-  while (-1 != (ch = getopt(argc, argv, "f:i:q:o:"))) {
+  while (-1 != (ch = getopt(argc, argv, "f:i:l:o:"))) {
     switch (ch) {
     case 'f':
       gpiofreq = strtod(optarg, NULL);
       break;
     case 'i':
-      channel0_input = strtol(optarg, NULL, 0);
-      if (channel0_input < 0 || channel0_input > 3) {
-        fprintf(stderr, "\n-i value must be between 0 and 3\n");
-        usage(argv[0]);
-      }
+      DACfile = optarg;
       break;
-    case 'q':
-      channel1_input = strtol(optarg, NULL, 0);
-      if (channel1_input < 4 || channel1_input > 7) {
-        fprintf(stderr, "\n-q value must be between 4 and 7\n");
-        usage(argv[0]);
-      }
+    // case 'q': //[VOP] UNUSED
+    //   channel1_input = strtol(optarg, NULL, 0);
+    //   if (channel1_input < 4 || channel1_input > 7) {
+    //     fprintf(stderr, "\n-q value must be between 4 and 7\n");
+    //     usage(argv[0]);
+    //   }
+    //   break;
+    case 'l': //[VOP]
+      loop = strtod(optarg, NULL);
       break;
     case 'o':
       fname = optarg;
@@ -119,6 +145,16 @@ int main (int argc, char **argv) {
     if (NULL == fout) {
       perror("unable to open output file");
     }
+  }
+
+  //[VOP] Get instructions for the DAC
+  if (0 != strcmp(DACfile, "-")) { 
+    DACdata = fopen(DACfile, "r");
+    if (NULL == fout) {
+      perror("unable to open input file");
+    }
+  } else {
+    DACdata = fopen("DACdata.txt", "r");
   }
 
   // Install signal handler to catch ctrl-C
@@ -145,20 +181,21 @@ int main (int argc, char **argv) {
   // Pointer into the DDR RAM mapped by the uio_pruss kernel module.
   volatile uint32_t *shared_ddr = NULL;
   prussdrv_map_extmem((void**)&shared_ddr);
-  unsigned int shared_ddr_len = prussdrv_extmem_size();
+  //[VOP] make ddr_len only go 2/3rds to leave last 3rd as input data for DAC
+  unsigned int shared_ddr_len = prussdrv_extmem_size() * 2/3;
   unsigned int physical_address = prussdrv_get_phys_addr((void*)shared_ddr);
 
   // Accessing the shared memory is slow, so later we'll efficiently copy it out
   // into this local buffer.
   uint32_t *local_buf = (uint32_t *) malloc(shared_ddr_len);
   if (!local_buf) {
-    fprintf(stderr, "Couldn't allocate memory.\n");
+    fprintf(stderr, "Couldn't allocate local buf memory.\n");
     return EXIT_FAILURE;
   }
 
   fprintf(stderr,
           "%uB of shared DDR available.\n Physical (PRU-side) address:%x\n",
-         shared_ddr_len, physical_address);
+         shared_ddr_len*3/2, physical_address);
   fprintf(stderr, "Virtual (linux-side) address: %p\n\n", shared_ddr);
   if (shared_ddr_len < 1e6) {
     fprintf(stderr, "Shared buffer length is unexpectedly small.  Buffer overruns"
@@ -176,8 +213,9 @@ int main (int argc, char **argv) {
   int cycles = (PRU_CLK/gpiofreq + 0.5);
   fprintf(stderr, "Actual GPIO clock speed is %.2fHz\n", PRU_CLK/((float)cycles));
 
-  if (cycles < 12) {
-    fprintf(stderr, "Requested frequency too high (max: 16666666)\n");
+  if (cycles < 20) {
+    //[VOP] Edited to 10Mhz to add time for CS generation on PRU 0
+    fprintf(stderr, "Requested frequency too high (max: 10Mhz)\n"); 
     return EXIT_FAILURE;
   }
   pparams->high_cycles = cycles/2;
@@ -189,23 +227,60 @@ int main (int argc, char **argv) {
             " Consider using BeagleLogic's PRUDAQ support instead.\n");
   }
 
+  //[VOP] UNUSED!!! May be removed
   // Decide the value that'll get written to PRU0's register r30
   // See the docs for how bits in r30 correspond to the INPUT0A/
   // INPUT0B/INPUT1A/INPUT1B control lines on the analog switches.
-  uint32_t pru0r30 = 0;
-  switch (channel0_input) {
-    case 0: break;
-    case 1: pru0r30 |= (1 << 1); break;
-    case 2: pru0r30 |= (1 << 2); break;
-    case 3: pru0r30 |= (1 << 1) | (1 << 2); break;
+  // uint32_t pru0r30 = 0;
+  // switch (channel0_input) {
+  //   case 0: break;
+  //   case 1: pru0r30 |= (1 << 1); break;
+  //   case 2: pru0r30 |= (1 << 2); break;
+  //   case 3: pru0r30 |= (1 << 1) | (1 << 2); break;
+  // }
+  // switch (channel1_input) {
+  //   case 4: break;
+  //   case 5: pru0r30 |= (1 << 3); break;
+  //   case 6: pru0r30 |= (1 << 5); break;
+  //   case 7: pru0r30 |= (1 << 3) | (1 << 5); break;
+  // }
+  // pparams->input_select = pru0r30;
+
+  //[VOP] Generate a buffer for the DAC instructions
+  uint32_t *DAC_buf = (uint32_t *) malloc(shared_ddr_len*1/2);
+  if (!DAC_buf) {
+    fprintf(stderr, "Couldn't allocate DAC buf memory.\n");
+    return EXIT_FAILURE;
   }
-  switch (channel1_input) {
-    case 4: break;
-    case 5: pru0r30 |= (1 << 3); break;
-    case 6: pru0r30 |= (1 << 5); break;
-    case 7: pru0r30 |= (1 << 3) | (1 << 5); break;
+  
+  //[VOP] Fill the full DAC_buf with (looped) DAC instructions
+  read_DACdata(DAC_buf, DACdata, int(sizeof(shared_ddr_len)/2), 0);
+
+  //[VOP] Read DACdata in 1 word segments
+  uint32_t DACword = 0;
+  for(i=0;i<shared_ddr_len/2;i++) {//[VOP] /2 cuz 32 int but half length buffer
+    size_t notEND = fread(DACword, sizeof(uint32_t), 1, DACdata);
+
+    //[VOP] If file shorter than 1 MiB: loop while skipping first two words, 
+    //[VOP] which are used for reset and first freq setup
+    if notEND == 0; {
+      fseek(DACdata, 8, SEEK_SET);
+      size_t fileToShort = fread(DACword, sizeof(uint32_t), 1, DACdata);
+
+      //[VOP] if still no word, then file to short to use. return error
+      if fileToShort == 0; {
+        fprintf(stderr, "DAC instructions file too short: make sure it's at least 12 bytes long!\n");
+        return EXIT_FAILURE;
+      }
+    }
+    //[VOP] Convert to int (PRU will see the correct individual bits)
+    DAC_buf[i] = Convert.ToInt32(DACword,2);
   }
-  pparams->input_select = pru0r30;
+
+  //[VOP] Write to "hidden" DAC buffer, not certain if correct
+  memcpy((shared_ddr[shared_ddr_len]), (void *)  &(DAC_buf), sizeof(DAC_buf));
+
+
 
   // Load the .bin files into PRU0 and PRU1
   prussdrv_exec_program(0, argv[0]);
@@ -245,6 +320,11 @@ int main (int argc, char **argv) {
         local_buf[i] &= 0x03ff03ff;
       }
 
+      //[VOP] Read in new DAC instructions, everything /2, cuz DAC data half as fast as ADC data
+      //[VOP] ADC always per 2 words, so normally always an int, but better safe than sorry
+      read_DACdata(DAC_buf, DACdata, int((write_index - read_index)/2), int(read_index/2));
+      memcpy((shared_ddr[shared_ddr_len + int(read_index/2)]), (void *) &(DAC_buf[int(read_index/2)]), bytes);
+
       fwrite(local_buf, bytes, 1, fout);
 
     } else {
@@ -260,6 +340,10 @@ int main (int argc, char **argv) {
         local_buf[i] &= 0x03ff03ff;
       }
 
+      //[VOP] First do until end of DAC buffer
+      read_DACdata(DAC_buf, DACdata, int(tail_words/2), int(read_index/2));
+      memcpy((shared_ddr[shared_ddr_len + int(read_index/2)]), (void *) &(DAC_buf[int(read_index/2)]), int(tail_bytes/2));
+
       int head_bytes = write_index * sizeof(*shared_ddr);
       memcpy(&(local_buf[tail_words]), (void *) shared_ddr, head_bytes);
       bytes_read += head_bytes;
@@ -268,7 +352,14 @@ int main (int argc, char **argv) {
         local_buf[tail_words + i] &= 0x03ff03ff;
       }
 
+      //[VOP] Then wrap around
+      read_DACdata(DAC_buf, DACdata, int(write_index/2), 0);
+      memcpy((shared_ddr[shared_ddr_len), (void *) &(DAC_buf), int(head_bytes/2));
+
       fwrite(local_buf, tail_bytes + head_bytes, 1, fout);
+
+      //[VOP] Stop if loop == 0
+      if (loop == 0) {bCont = 0}
     }
     read_index = write_index;
 
@@ -304,6 +395,8 @@ int main (int argc, char **argv) {
   if (stdout != fout) {
     fclose(fout);
   }
+  //[VOP]
+  fclose(DACdata);
 
   return 0;
 }

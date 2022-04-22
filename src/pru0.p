@@ -16,10 +16,11 @@ permissions and limitations under the License.
 */
 
 /*
-This generates an ADC clock using GPIO pin P9_31.  It also selects
-the analog switch inputs specified by the host CPU, determining which
-of the inputs 0..3 will be sampled by ADC channel 0, and which of the
-inputs 4..7 will be sampled by ADC channel 1.
+This generates an ADC clock using GPIO pin P9_31.
+
+[VOP] Also generates the CS signal for SPI control using GPIO pin P9_29.
+      Cycle is hardcoded on 16 pulses low, 4 pulses high.
+      So runs at Fclk/20 sample rate.
 */
 
 .origin 0
@@ -38,7 +39,10 @@ inputs 4..7 will be sampled by ADC channel 1.
 #define LOW_COUNTER  r24
 #define LOW_START    r25
 
-#define SHARED_RAM r29
+//[VOP] Hopefully works, didn't check if r26 used
+#define CS_COUNTER   r26
+
+#define SHARED_RAM   r29
 
 #define NOP add r0, r0, 0
 
@@ -51,10 +55,17 @@ TOP:
   mov SHARED_RAM, SHARED_RAM_ADDRESS
   lbbo HIGH_COUNT, SHARED_RAM, OFFSET(Params.high_cycles), SIZE(Params.high_cycles)
   lbbo LOW_COUNT, SHARED_RAM, OFFSET(Params.low_cycles), SIZE(Params.low_cycles)
+  //[VOP] initializes P9_29 (CS) on high
   lbbo r30, SHARED_RAM, OFFSET(Params.input_select), SIZE(Params.input_select)
 
   mov HIGH_COUNTER, HIGH_COUNT
   mov LOW_COUNTER, LOW_COUNT
+
+
+  //[VOP] Best way I found to make sure CS_COUNTER starts on 0
+  //[VOP] Clears r26 (4 bytes).
+  //[VOP] May be unneeded if registers init on 0.
+  zero &CS_COUNTER, 4
 
   // The loop decrements by 2, so we need to start a cycle early
   // if the count is odd.  Store the appropriate starting address
@@ -76,7 +87,19 @@ CYCLE_H_IS_ODD:
 CYCLE_ODD_H:
   sub HIGH_COUNTER, HIGH_COUNTER, 1
 CYCLE_EVEN_H:
-  NOP
+  //NOP
+
+  //[VOP] Add to CS counter
+  add CS_COUNTER, CS_COUNTER, 1
+  sub HIGH_COUNTER, HIGH_COUNTER, 2
+
+  //[VOP] GPIO clock pin P9_29 goes low after 4 SCLK cycles
+  qble WAIT_H, CS_COUNTER, 4
+  //[VOP] CS goes low 15 or 20ns after SCLK goes high, costs 2 cycles
+  sub HIGH_COUNTER, HIGH_COUNTER, 2
+  clr r30, 1
+  
+
 WAIT_H:
   sub HIGH_COUNTER, HIGH_COUNTER, 2
   qblt WAIT_H, HIGH_COUNTER, 4
@@ -93,7 +116,16 @@ WAIT_H:
 CYCLE_ODD_L:
   sub LOW_COUNTER, LOW_COUNTER, 1
 CYCLE_EVEN_L:
+  //NOP
+
+  //[VOP] GPIO clock pin P9_29 goes high after 20 SCLK cycles
+  qblt WAIT_L, CS_COUNTER, 20
+  //[VOP] CS goes high 20 or 25ns after SCLK goes low, costs 3 cycles, but force even => 4
+  sub LOW_COUNTER, LOW_COUNTER, 4
+  sub CS_COUNTER, CS_COUNTER, 20
   NOP
+  set r30, 1
+  
 WAIT_L:
   sub LOW_COUNTER, LOW_COUNTER, 2
   qblt WAIT_L, LOW_COUNTER, 4
@@ -103,6 +135,7 @@ WAIT_L:
 
   // GPIO clock pin P9_31 goes high
   set r30, 0
+
 
   // Start the cycle over, skipping CYCLE_ODD_H if the count is even
   JMP HIGH_START
